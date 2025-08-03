@@ -1,0 +1,3 @@
+[console_scripts]
+tm = task_manager.cli:cli
+

@@ -1,0 +1,4 @@
+typer[all]
+pydantic
+rich
+pytest

@@ -1,0 +1,11 @@
+setup.py
+task-manager/__init__.py
+task-manager/main.py
+task-manager/models.py
+task-manager/runner.py
+task_manager.egg-info/PKG-INFO
+task_manager.egg-info/SOURCES.txt
+task_manager.egg-info/dependency_links.txt
+task_manager.egg-info/entry_points.txt
+task_manager.egg-info/requires.txt
+task_manager.egg-info/top_level.txt

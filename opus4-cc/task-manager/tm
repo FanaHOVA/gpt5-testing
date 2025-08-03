@@ -1,0 +1,427 @@
+#!/usr/bin/env python3
+"""
+Task Manager - A CLI tool for managing tasks across parallel AI agent instances.
+"""
+
+import json
+import os
+import sys
+import argparse
+import uuid
+from datetime import datetime
+from typing import List, Dict, Optional, Set
+from pathlib import Path
+import shutil
+from enum import Enum
+
+class TaskStatus(str, Enum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    BLOCKED = "blocked"
+    CANCELLED = "cancelled"
+
+class TaskPriority(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+class TaskManager:
+    def __init__(self, data_file: str = None):
+        if data_file is None:
+            # Use a shared location that all worktrees can access
+            home = os.path.expanduser("~")
+            self.data_dir = os.path.join(home, ".task-manager")
+            os.makedirs(self.data_dir, exist_ok=True)
+            self.data_file = os.path.join(self.data_dir, "tasks.json")
+            self.notifications_file = os.path.join(self.data_dir, "notifications.json")
+        else:
+            self.data_file = data_file
+            self.data_dir = os.path.dirname(data_file)
+            self.notifications_file = os.path.join(self.data_dir, "notifications.json")
+        
+        self.load_data()
+    
+    def load_data(self):
+        """Load tasks and notifications from JSON files."""
+        if os.path.exists(self.data_file):
+            with open(self.data_file, 'r') as f:
+                data = json.load(f)
+                self.tasks = data.get('tasks', {})
+                self.next_id = data.get('next_id', 1)
+        else:
+            self.tasks = {}
+            self.next_id = 1
+        
+        if os.path.exists(self.notifications_file):
+            with open(self.notifications_file, 'r') as f:
+                self.notifications = json.load(f)
+        else:
+            self.notifications = {}
+    
+    def save_data(self):
+        """Save tasks to JSON file."""
+        data = {
+            'tasks': self.tasks,
+            'next_id': self.next_id,
+            'last_updated': datetime.now().isoformat()
+        }
+        with open(self.data_file, 'w') as f:
+            json.dump(data, f, indent=2)
+        
+        with open(self.notifications_file, 'w') as f:
+            json.dump(self.notifications, f, indent=2)
+    
+    def add_task(self, title: str, description: str = "", assignee: str = None,
+                 priority: str = TaskPriority.MEDIUM, parent_id: str = None,
+                 dependencies: List[str] = None, file_refs: List[str] = None,
+                 worktree: str = None):
+        """Add a new task."""
+        task_id = str(self.next_id)
+        self.next_id += 1
+        
+        task = {
+            'id': task_id,
+            'title': title,
+            'description': description,
+            'status': TaskStatus.PENDING,
+            'priority': priority,
+            'assignee': assignee or os.environ.get('USER', 'unassigned'),
+            'parent_id': parent_id,
+            'dependencies': dependencies or [],
+            'file_refs': file_refs or [],
+            'worktree': worktree or os.getcwd(),
+            'created_at': datetime.now().isoformat(),
+            'updated_at': datetime.now().isoformat(),
+            'completed_at': None,
+            'blocked_by': [],
+            'children': []
+        }
+        
+        # Update parent's children list
+        if parent_id and parent_id in self.tasks:
+            self.tasks[parent_id]['children'].append(task_id)
+        
+        # Check if blocked by dependencies
+        if dependencies:
+            for dep_id in dependencies:
+                if dep_id in self.tasks and self.tasks[dep_id]['status'] != TaskStatus.COMPLETED:
+                    task['blocked_by'].append(dep_id)
+            
+            if task['blocked_by']:
+                task['status'] = TaskStatus.BLOCKED
+        
+        self.tasks[task_id] = task
+        self.save_data()
+        return task_id
+    
+    def update_task(self, task_id: str, **kwargs):
+        """Update task attributes."""
+        if task_id not in self.tasks:
+            raise ValueError(f"Task {task_id} not found")
+        
+        task = self.tasks[task_id]
+        
+        # Update allowed fields
+        allowed_fields = ['title', 'description', 'status', 'priority', 'assignee', 
+                         'dependencies', 'file_refs']
+        for field, value in kwargs.items():
+            if field in allowed_fields:
+                task[field] = value
+        
+        task['updated_at'] = datetime.now().isoformat()
+        
+        # Re-check dependencies if status or dependencies changed
+        if 'status' in kwargs or 'dependencies' in kwargs:
+            self._check_dependencies(task_id)
+        
+        self.save_data()
+    
+    def complete_task(self, task_id: str):
+        """Mark a task as completed and check impacts."""
+        if task_id not in self.tasks:
+            raise ValueError(f"Task {task_id} not found")
+        
+        task = self.tasks[task_id]
+        task['status'] = TaskStatus.COMPLETED
+        task['completed_at'] = datetime.now().isoformat()
+        task['updated_at'] = datetime.now().isoformat()
+        
+        # Check all tasks that depend on this one
+        notifications = []
+        for tid, t in self.tasks.items():
+            if task_id in t.get('dependencies', []):
+                # Remove from blocked_by if present
+                if task_id in t.get('blocked_by', []):
+                    t['blocked_by'].remove(task_id)
+                    
+                    # If no more blockers, unblock the task
+                    if not t['blocked_by'] and t['status'] == TaskStatus.BLOCKED:
+                        t['status'] = TaskStatus.PENDING
+                        notifications.append({
+                            'task_id': tid,
+                            'message': f"Task {tid} is now unblocked",
+                            'timestamp': datetime.now().isoformat()
+                        })
+        
+        # Analyze potential impacts
+        impacts = self._analyze_impacts(task_id)
+        if impacts:
+            for impact in impacts:
+                notifications.append(impact)
+        
+        # Save notifications
+        if notifications:
+            assignee = task.get('assignee', 'all')
+            if assignee not in self.notifications:
+                self.notifications[assignee] = []
+            self.notifications[assignee].extend(notifications)
+        
+        self.save_data()
+        return notifications
+    
+    def _check_dependencies(self, task_id: str):
+        """Check and update task dependency status."""
+        task = self.tasks[task_id]
+        blocked_by = []
+        
+        for dep_id in task.get('dependencies', []):
+            if dep_id in self.tasks and self.tasks[dep_id]['status'] != TaskStatus.COMPLETED:
+                blocked_by.append(dep_id)
+        
+        task['blocked_by'] = blocked_by
+        if blocked_by and task['status'] == TaskStatus.PENDING:
+            task['status'] = TaskStatus.BLOCKED
+        elif not blocked_by and task['status'] == TaskStatus.BLOCKED:
+            task['status'] = TaskStatus.PENDING
+    
+    def _analyze_impacts(self, completed_task_id: str) -> List[Dict]:
+        """Analyze potential impacts of a completed task on other tasks."""
+        impacts = []
+        completed_task = self.tasks[completed_task_id]
+        
+        # Check if completed task modified files that other tasks reference
+        for tid, task in self.tasks.items():
+            if tid == completed_task_id or task['status'] == TaskStatus.COMPLETED:
+                continue
+            
+            # Check file reference overlaps
+            if task.get('file_refs'):
+                overlapping_files = set(task['file_refs']) & set(completed_task.get('file_refs', []))
+                if overlapping_files:
+                    impacts.append({
+                        'task_id': tid,
+                        'message': f"Task {tid} references files modified by completed task {completed_task_id}: {', '.join(overlapping_files)}",
+                        'severity': 'warning',
+                        'timestamp': datetime.now().isoformat()
+                    })
+        
+        return impacts
+    
+    def list_tasks(self, status: Optional[str] = None, assignee: Optional[str] = None,
+                   show_tree: bool = False):
+        """List tasks with optional filtering."""
+        filtered_tasks = []
+        
+        for task_id, task in self.tasks.items():
+            if status and task['status'] != status:
+                continue
+            if assignee and task['assignee'] != assignee:
+                continue
+            filtered_tasks.append(task)
+        
+        # Sort by priority and creation time
+        priority_order = {
+            TaskPriority.CRITICAL: 0,
+            TaskPriority.HIGH: 1,
+            TaskPriority.MEDIUM: 2,
+            TaskPriority.LOW: 3
+        }
+        filtered_tasks.sort(key=lambda t: (priority_order.get(t['priority'], 99), t['created_at']))
+        
+        return filtered_tasks
+    
+    def get_notifications(self, assignee: str = None) -> List[Dict]:
+        """Get notifications for an assignee."""
+        if assignee is None:
+            assignee = os.environ.get('USER', 'all')
+        
+        notifications = self.notifications.get(assignee, [])
+        # Clear notifications after reading
+        if assignee in self.notifications:
+            self.notifications[assignee] = []
+            self.save_data()
+        
+        return notifications
+
+def format_task(task: Dict, verbose: bool = False) -> str:
+    """Format a task for display."""
+    status_colors = {
+        TaskStatus.PENDING: '\033[33m',      # Yellow
+        TaskStatus.IN_PROGRESS: '\033[34m',   # Blue
+        TaskStatus.COMPLETED: '\033[32m',     # Green
+        TaskStatus.BLOCKED: '\033[31m',       # Red
+        TaskStatus.CANCELLED: '\033[90m'     # Gray
+    }
+    
+    priority_symbols = {
+        TaskPriority.LOW: '○',
+        TaskPriority.MEDIUM: '◐',
+        TaskPriority.HIGH: '●',
+        TaskPriority.CRITICAL: '⚠'
+    }
+    
+    color = status_colors.get(task['status'], '')
+    reset = '\033[0m'
+    
+    output = f"{color}[{task['id']}] {priority_symbols.get(task['priority'], '')} {task['title']}{reset}"
+    
+    if verbose:
+        output += f"\n  Status: {task['status']}"
+        output += f"\n  Assignee: {task['assignee']}"
+        if task['description']:
+            output += f"\n  Description: {task['description']}"
+        if task['dependencies']:
+            output += f"\n  Dependencies: {', '.join(task['dependencies'])}"
+        if task['blocked_by']:
+            output += f"\n  Blocked by: {', '.join(task['blocked_by'])}"
+        if task['file_refs']:
+            output += f"\n  Files: {', '.join(task['file_refs'])}"
+        output += f"\n  Created: {task['created_at'][:10]}"
+        if task['completed_at']:
+            output += f"\n  Completed: {task['completed_at'][:10]}"
+    
+    return output
+
+def main():
+    parser = argparse.ArgumentParser(description='Task Manager for parallel AI agents')
+    subparsers = parser.add_subparsers(dest='command', help='Commands')
+    
+    # Add command
+    add_parser = subparsers.add_parser('add', help='Add a new task')
+    add_parser.add_argument('title', help='Task title')
+    add_parser.add_argument('-d', '--description', default='', help='Task description')
+    add_parser.add_argument('-a', '--assignee', help='Assignee (default: current user)')
+    add_parser.add_argument('-p', '--priority', choices=['low', 'medium', 'high', 'critical'],
+                           default='medium', help='Task priority')
+    add_parser.add_argument('--parent', help='Parent task ID')
+    add_parser.add_argument('--depends-on', nargs='+', help='Task dependencies')
+    add_parser.add_argument('-f', '--files', nargs='+', help='Referenced files')
+    
+    # List command
+    list_parser = subparsers.add_parser('list', help='List tasks')
+    list_parser.add_argument('-s', '--status', choices=['pending', 'in_progress', 'completed', 'blocked', 'cancelled'],
+                            help='Filter by status')
+    list_parser.add_argument('-a', '--assignee', help='Filter by assignee')
+    list_parser.add_argument('-v', '--verbose', action='store_true', help='Show detailed information')
+    list_parser.add_argument('--tree', action='store_true', help='Show task hierarchy')
+    
+    # Update command
+    update_parser = subparsers.add_parser('update', help='Update a task')
+    update_parser.add_argument('task_id', help='Task ID')
+    update_parser.add_argument('-t', '--title', help='New title')
+    update_parser.add_argument('-d', '--description', help='New description')
+    update_parser.add_argument('-s', '--status', choices=['pending', 'in_progress', 'completed', 'blocked', 'cancelled'],
+                              help='New status')
+    update_parser.add_argument('-p', '--priority', choices=['low', 'medium', 'high', 'critical'],
+                              help='New priority')
+    update_parser.add_argument('-a', '--assignee', help='New assignee')
+    
+    # Complete command
+    complete_parser = subparsers.add_parser('complete', help='Mark task as completed')
+    complete_parser.add_argument('task_id', help='Task ID')
+    
+    # Start command
+    start_parser = subparsers.add_parser('start', help='Start working on a task')
+    start_parser.add_argument('task_id', help='Task ID')
+    
+    # Notifications command
+    notif_parser = subparsers.add_parser('notifications', help='Check notifications')
+    notif_parser.add_argument('-a', '--assignee', help='Check notifications for specific assignee')
+    
+    # Show command
+    show_parser = subparsers.add_parser('show', help='Show task details')
+    show_parser.add_argument('task_id', help='Task ID')
+    
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
+        return
+    
+    tm = TaskManager()
+    
+    try:
+        if args.command == 'add':
+            task_id = tm.add_task(
+                title=args.title,
+                description=args.description,
+                assignee=args.assignee,
+                priority=args.priority,
+                parent_id=args.parent,
+                dependencies=args.depends_on,
+                file_refs=args.files
+            )
+            print(f"Created task {task_id}")
+        
+        elif args.command == 'list':
+            tasks = tm.list_tasks(status=args.status, assignee=args.assignee)
+            if not tasks:
+                print("No tasks found")
+            else:
+                for task in tasks:
+                    print(format_task(task, verbose=args.verbose))
+                    if args.verbose:
+                        print()
+        
+        elif args.command == 'update':
+            kwargs = {}
+            if args.title:
+                kwargs['title'] = args.title
+            if args.description:
+                kwargs['description'] = args.description
+            if args.status:
+                kwargs['status'] = args.status
+            if args.priority:
+                kwargs['priority'] = args.priority
+            if args.assignee:
+                kwargs['assignee'] = args.assignee
+            
+            tm.update_task(args.task_id, **kwargs)
+            print(f"Updated task {args.task_id}")
+        
+        elif args.command == 'complete':
+            notifications = tm.complete_task(args.task_id)
+            print(f"Completed task {args.task_id}")
+            if notifications:
+                print("\nNotifications:")
+                for notif in notifications:
+                    print(f"  - {notif['message']}")
+        
+        elif args.command == 'start':
+            tm.update_task(args.task_id, status=TaskStatus.IN_PROGRESS)
+            print(f"Started working on task {args.task_id}")
+        
+        elif args.command == 'notifications':
+            notifications = tm.get_notifications(args.assignee)
+            if not notifications:
+                print("No notifications")
+            else:
+                print("Notifications:")
+                for notif in notifications:
+                    print(f"  [{notif['timestamp'][:19]}] {notif['message']}")
+        
+        elif args.command == 'show':
+            if args.task_id in tm.tasks:
+                task = tm.tasks[args.task_id]
+                print(format_task(task, verbose=True))
+            else:
+                print(f"Task {args.task_id} not found")
+    
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()

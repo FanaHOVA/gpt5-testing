@@ -1,0 +1,3 @@
+[console_scripts]
+task = task_manager.main:app
+

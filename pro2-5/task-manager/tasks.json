@@ -1,0 +1,29 @@
+[
+    {
+        "id": "e3aed6c4-7031-4898-879c-7848d9625fcf",
+        "title": "Implement task creation and listing",
+        "description": "Add the ability to create new tasks in the system",
+        "status": "open",
+        "assignee": null,
+        "dependencies": [],
+        "file_path": null
+    },
+    {
+        "id": "b2d9008b-8c2c-43fc-a5bb-c7d1139f3a5b",
+        "title": "Write documentation",
+        "description": "Document the new task manager CLI",
+        "status": "done",
+        "assignee": null,
+        "dependencies": [],
+        "file_path": null
+    },
+    {
+        "id": "345022f4-e931-4999-85e4-712ad90b40ae",
+        "title": "Release new version",
+        "description": null,
+        "status": "open",
+        "assignee": null,
+        "dependencies": [],
+        "file_path": null
+    }
+]

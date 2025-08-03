@@ -1,0 +1,17 @@
+services:
+  app:
+    image: selfimproving/python-dev:3.11
+    working_dir: /workspace
+    entrypoint: ["/usr/bin/tini", "--"]
+    command: ["bash", "-lc", "tail -f /dev/null"]
+    environment:
+      - HOME=/home/dev
+      - SMOL_PODCASTER_DIR=/home/dev/src/smol-podcaster
+      - RUNS_DIR=/workspace/runs
+      - RUN_NAME=${RUN_NAME:-dev}
+      - ARTIFACTS_DIR=/artifacts
+      - RUN_PATH=/artifacts
+    volumes:
+      - ../:/workspace
+      - ${HOME}/.cache/pip:/home/dev/.cache/pip
+      - ${ARTIFACTS_HOST:-../runs/dev}:/artifacts
